@@ -41,6 +41,16 @@ jobs:
           pio pkg list
           pio run -t clean
 
+      - name: Prepare Gemini API key header
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$GEMINI_API_KEY"
+          printf '#pragma once\n#define GEMINI_API_KEY "%s"\n' "$GEMINI_API_KEY" > components/websocket/include/gemini_api_key.h
+          test -s components/websocket/include/gemini_api_key.h
+          echo "Gemini API key header: PASS"
+
       - name: Build ESP32-S3
         run: pio run
 
