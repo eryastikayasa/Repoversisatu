@@ -22,8 +22,8 @@ static SemaphoreHandle_t audio_send_mutex = NULL;
 
 #define AUDIO_OUTPUT_SAMPLE_RATE       24000U
 #define AUDIO_OUTPUT_BYTES_PER_SEC     (AUDIO_OUTPUT_SAMPLE_RATE * 2U)
-#define AUDIO_RING_BUFFER_SIZE         (1024 * 1024) // 1 MiB ≈ 21,8 detik
-#define AUDIO_PLAYBACK_PREBUFFER_SIZE  (512 * 1024)  // 512 KiB ≈ 10,9 detik
+#define AUDIO_RING_BUFFER_SIZE         (512 * 1024)  // 512 KiB
+#define AUDIO_PLAYBACK_PREBUFFER_SIZE  (256 * 1024)  // 256 KiB
 #define AUDIO_PLAYBACK_READ_SIZE       2048
 #define AUDIO_PLAYBACK_READ_WAIT_MS    5
 #define AUDIO_PLAYBACK_TRIGGER_SIZE    1024
@@ -232,10 +232,10 @@ bool start_audio_playback(void)
     }
 
     // Alokasikan memori untuk stream buffer di PSRAM
-    uint8_t *buffer_mem = heap_caps_malloc(AUDIO_RING_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
+    uint8_t *buffer_mem = (uint8_t*)heap_caps_malloc(AUDIO_RING_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
     if (buffer_mem == NULL) {
         // Fallback ke RAM internal jika PSRAM gagal
-        buffer_mem = heap_caps_malloc(AUDIO_RING_BUFFER_SIZE, MALLOC_CAP_INTERNAL);
+        buffer_mem = (uint8_t*)heap_caps_malloc(AUDIO_RING_BUFFER_SIZE, MALLOC_CAP_INTERNAL);
         if (buffer_mem == NULL) {
             ESP_LOGE(TAG, "Gagal alokasi %u byte untuk audio buffer", 
                      (unsigned)AUDIO_RING_BUFFER_SIZE);
