@@ -1,8 +1,28 @@
-cmake_minimum_required(VERSION 3.16)
+idf_component_register(
+    SRCS
+        "websocket_mgr.cpp"
+        "websocket_events.cpp"
+        "websocket_rx.cpp"
+        "websocket_json.cpp"
+        "websocket_audio.cpp"
+        "websocket_tx.cpp"
+        "websocket_stack_wrap.c"
 
-set(EXTRA_COMPONENT_DIRS
-    "${CMAKE_CURRENT_LIST_DIR}/components"
+    INCLUDE_DIRS
+        "include"
+
+    REQUIRES
+        esp_websocket_client
+        esp-tls
+        esp_event
+        cjson
+        mbedtls
+        display
+        audio_hal
+        wifi_manager
 )
 
-include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(xiaozhi_esp32s3)
+# V7.0.12: increase only the ESP WebSocket client's internal task stack.
+target_link_libraries(${COMPONENT_LIB} INTERFACE
+    "-Wl,--wrap=esp_websocket_client_init"
+)
