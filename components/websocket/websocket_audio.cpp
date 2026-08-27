@@ -22,8 +22,8 @@ static SemaphoreHandle_t audio_send_mutex = NULL;
 
 #define AUDIO_OUTPUT_SAMPLE_RATE       24000U
 #define AUDIO_OUTPUT_BYTES_PER_SEC     (AUDIO_OUTPUT_SAMPLE_RATE * 2U)
-#define AUDIO_RING_BUFFER_SIZE         (64 * 1024)
-#define AUDIO_PLAYBACK_PREBUFFER_SIZE  (24 * 1024)
+#define AUDIO_RING_BUFFER_SIZE         (1024 * 1024) // 1 MiB ≈ 21,8 detik
+#define AUDIO_PLAYBACK_PREBUFFER_SIZE  (512 * 1024)  // 512 KiB ≈ 10,9 detik
 #define AUDIO_PLAYBACK_READ_SIZE       2048
 #define AUDIO_PLAYBACK_READ_WAIT_MS    5
 #define AUDIO_PLAYBACK_TRIGGER_SIZE    1024
@@ -230,13 +230,29 @@ bool start_audio_playback(void)
             return false;
         }
     }
-    audio_stream = xStreamBufferCreate(AUDIO_RING_BUFFER_SIZE,
-                                       AUDIO_PLAYBACK_TRIGGER_SIZE);
+
+    // Alokasikan memori untuk stream buffer di PSRAM
+    uint8_t *buffer_mem = heap_caps_malloc(AUDIO_RING_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
+    if (buffer_mem == NULL) {
+        // Fallback ke RAM internal jika PSRAM gagal
+        buffer_mem = heap_caps_malloc(AUDIO_RING_BUFFER_SIZE, MALLOC_CAP_INTERNAL);
+        if (buffer_mem == NULL) {
+            ESP_LOGE(TAG, "Gagal alokasi %u byte untuk audio buffer", 
+                     (unsigned)AUDIO_RING_BUFFER_SIZE);
+            return false;
+        }
+        ESP_LOGW(TAG, "Menggunakan RAM internal untuk audio buffer");
+    }
+
+    // Buat static stream buffer menggunakan memori yang sudah dialokasikan
+    static StaticStreamBuffer_t stream_buffer_struct;
+    audio_stream = xStreamBufferCreateStatic(AUDIO_RING_BUFFER_SIZE,
+                                             AUDIO_PLAYBACK_TRIGGER_SIZE,
+                                             buffer_mem,
+                                             &stream_buffer_struct);
     if (audio_stream == NULL) {
-        ESP_LOGE(TAG, "Gagal membuat audio ring buffer %u byte free_internal=%u largest=%u",
-                 (unsigned)AUDIO_RING_BUFFER_SIZE,
-                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        ESP_LOGE(TAG, "Gagal membuat static stream buffer");
+        heap_caps_free(buffer_mem);
         return false;
     }
     /* v7.1.3 diagnostic: lower playback priority and keep it on CPU0 as in
