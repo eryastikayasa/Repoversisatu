@@ -31,9 +31,35 @@ void display_status(const char *status);
 void face_render(void);
 void display_render_buffer(const uint8_t *buffer);
 
-// Mochi renderer: expr 0=normal, 1=smile, 2=happy, 3=wink, 6=sad, 99=IR/self-test.
-// step=0 open, step=1 blink. sX/sY shift the whole pair of eyes; arahLirik 0=center, 1=left, 2=right.
-void display_render_mochi(int expr, int step, int sX, int sY, int arahLirik);
+// Mochi renderer:
+//
+// expr:
+//   0  = normal
+//   1  = listening
+//   2  = happy / speaking
+//   6  = sad
+//   99 = error
+//
+// step:
+//   0 = mata terbuka
+//   1 = blink / mata tertutup
+//
+// sX / sY:
+//   menggeser seluruh pasangan mata.
+//
+// arahLirik:
+//   0 = tengah
+//   1 = kiri
+//   2 = kanan
+//   3 = atas
+//
+void display_render_mochi(
+    int expr,
+    int step,
+    int sX,
+    int sY,
+    int arahLirik
+);
 
 void face_animation_start(void);
 void face_animation_stop(void);
