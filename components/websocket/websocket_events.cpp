@@ -9,6 +9,7 @@
 static const char *TAG = "WS_EVENT";
 static volatile bool lifecycle_invalidated = false;
 static volatile bool websocket_cleanup_pending = false;
+static volatile bool websocket_finish_received = false;
 
 static void invalidate_connection_generation(void)
 {
@@ -37,6 +38,7 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
             ESP_LOGI(TAG, "WebSocket TERHUBUNG ke Gemini!");
             lifecycle_invalidated = false;
             websocket_cleanup_pending = false;
+            websocket_finish_received = false;
             is_connected = true;
             setup_complete = false;
             websocket_tx_error = false;
@@ -90,7 +92,8 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
             websocket_rx_flush_queue();
             websocket_rx_request_reset();
             request_audio_buffer_clear();
-            /* Never close/abort/destroy the client from this callback. */
+            /* Only mark cleanup pending. The websocket callback must never
+             * close, abort, or destroy its own client. */
             websocket_cleanup_pending = true;
             break;
 
@@ -125,12 +128,9 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
 
         case WEBSOCKET_EVENT_FINISH:
             ESP_LOGI(TAG, "WebSocket FINISH");
-            /*
-             * ESP-IDF runs this callback from the websocket task. Do NOT call
-             * esp_websocket_client_destroy() here: the client may still own
-             * the task's lifecycle locks. The manager performs destruction
-             * from its own task after FINISH has been observed.
-             */
+            /* FINISH is the hand-off point: the websocket task has finished
+             * its lifecycle. A separate manager task may now destroy client. */
+            websocket_finish_received = true;
             websocket_cleanup_pending = true;
             websocket_reset_started();
             break;
@@ -142,10 +142,11 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
 
 bool websocket_cleanup_is_pending(void)
 {
-    return websocket_cleanup_pending;
+    return websocket_cleanup_pending && websocket_finish_received;
 }
 
 void websocket_cleanup_complete(void)
 {
     websocket_cleanup_pending = false;
+    websocket_finish_received = false;
 }
