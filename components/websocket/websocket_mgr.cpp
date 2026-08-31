@@ -39,6 +39,7 @@ QueueHandle_t websocket_tx_queue = NULL;
 TaskHandle_t websocket_tx_task_handle = NULL;
 QueueHandle_t websocket_rx_queue = NULL;
 TaskHandle_t websocket_rx_task_handle = NULL;
+static TaskHandle_t websocket_cleanup_task_handle = NULL;
 
 void websocket_tx_flush_queue(void)
 {
@@ -62,6 +63,34 @@ static void websocket_tx_fail(void)
     websocket_connection_generation = generation;
     websocket_tx_flush_queue();
     ESP_LOGW(TAG, "TX failure: audio producer dihentikan, generation=%lu", (unsigned long)generation);
+}
+
+static void websocket_cleanup_task(void *arg)
+{
+    (void)arg;
+    ESP_LOGI(TAG, "WebSocket lifecycle cleanup worker siap");
+    for (;;) {
+        if (websocket_cleanup_is_pending()) {
+            /* FINISH is delivered by the websocket task. Only after FINISH do
+             * we destroy the client, and this worker is a different FreeRTOS
+             * task, avoiding esp_websocket_client lifecycle lock recursion. */
+            esp_websocket_client_handle_t ws = client;
+            if (ws != NULL && !esp_websocket_client_is_connected(ws)) {
+                ESP_LOGI(TAG, "Cleanup worker: destroy client dari task manager");
+                esp_err_t err = esp_websocket_client_destroy(ws);
+                if (err == ESP_OK) {
+                    client = NULL;
+                    websocket_cleanup_complete();
+                    ESP_LOGI(TAG, "Cleanup worker: client berhasil dihancurkan");
+                } else {
+                    ESP_LOGW(TAG, "Cleanup worker: destroy ditunda, err=0x%x", (unsigned)err);
+                }
+            } else if (ws == NULL) {
+                websocket_cleanup_complete();
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
 }
 
 static void websocket_tx_task(void *arg)
@@ -88,11 +117,6 @@ static void websocket_tx_task(void *arg)
             free(setup_json); free(audio_data); continue;
         }
         if (cmd.type == WS_TX_COMMAND_AUDIO) {
-            /*
-             * V7.0.32 restores the proven v7.0.30 TX timing while keeping
-             * the v7.0.31 RX slot expansion. Capture frames remain 3200 bytes,
-             * but actual WebSocket writes stay at 1600-byte PCM chunks.
-             */
             static char b64_buf[2300];
             static char json_buf[2500];
             constexpr size_t PCM_SEND_CHUNK = 1600;
@@ -142,49 +166,20 @@ static void websocket_tx_task(void *arg)
                     if (cmd.generation != websocket_connection_generation || !is_connected || websocket_tx_error || client != ws || !esp_websocket_client_is_connected(ws)) {
                         break;
                     }
-
                     if (attempt > 0) {
                         vTaskDelay(AUDIO_SEND_RETRY_DELAY);
-                        if (cmd.generation != websocket_connection_generation || !is_connected || websocket_tx_error || client != ws || !esp_websocket_client_is_connected(ws)) {
-                            break;
-                        }
+                        if (cmd.generation != websocket_connection_generation || !is_connected || websocket_tx_error || client != ws || !esp_websocket_client_is_connected(ws)) break;
                     }
-
-                    int sent = esp_websocket_client_send_text(
-                        ws,
-                        json_buf,
-                        json_len,
-                        AUDIO_SEND_TIMEOUT);
-                    if (sent == json_len) {
-                        chunk_sent = true;
-                        break;
-                    }
-
-                    ESP_LOGW(
-                        TAG,
-                        "TX audio write timeout/fail: attempt=%d sent=%d expected=%d pcm_chunk=%u offset=%u/%u timeout=3000ms",
-                        attempt + 1,
-                        sent,
-                        json_len,
-                        (unsigned)chunk_len,
-                        (unsigned)offset,
-                        (unsigned)cmd.len);
+                    int sent = esp_websocket_client_send_text(ws, json_buf, json_len, AUDIO_SEND_TIMEOUT);
+                    if (sent == json_len) { chunk_sent = true; break; }
+                    ESP_LOGW(TAG, "TX audio write timeout/fail: attempt=%d sent=%d expected=%d pcm_chunk=%u offset=%u/%u timeout=3000ms",
+                             attempt + 1, sent, json_len, (unsigned)chunk_len, (unsigned)offset, (unsigned)cmd.len);
                 }
-
-                if (!chunk_sent) {
-                    send_failed = true;
-                    break;
-                }
-
+                if (!chunk_sent) { send_failed = true; break; }
                 offset += chunk_len;
             }
-
             if (send_failed) {
-                /* Do not force a second lifecycle transition here. The
-                 * websocket client reports the actual ERROR/DISCONNECTED
-                 * event when the transport has really failed. */
-                ESP_LOGW(TAG, "TX audio command dihentikan: sent_pcm=%u/%u",
-                         (unsigned)offset, (unsigned)cmd.len);
+                ESP_LOGW(TAG, "TX audio command dihentikan: sent_pcm=%u/%u", (unsigned)offset, (unsigned)cmd.len);
             }
             free(audio_data);
             continue;
@@ -201,6 +196,9 @@ bool websocket_tx_init(void)
     }
     if (!websocket_tx_task_handle) {
         if (xTaskCreate(websocket_tx_task, "ws_tx", 8192, NULL, 4, &websocket_tx_task_handle) != pdPASS) return false;
+    }
+    if (!websocket_cleanup_task_handle) {
+        if (xTaskCreate(websocket_cleanup_task, "ws_cleanup", 3072, NULL, 3, &websocket_cleanup_task_handle) != pdPASS) return false;
     }
     return true;
 }
@@ -244,11 +242,6 @@ void websocket_app_start(void)
     cfg.cert_common_name = "generativelanguage.googleapis.com";
     cfg.network_timeout_ms = 15000;
     cfg.disable_auto_reconnect = true;
-
-    /*
-     * V7.0.28 DIAGNOSTIC retained:
-     * Enable library keep-alive PING while isolating the WebSocket write path.
-     */
     cfg.keep_alive_enable = true;
     cfg.keep_alive_idle = 30;
     cfg.keep_alive_interval = 10;
@@ -272,6 +265,7 @@ bool websocket_is_connected(void)
 
 void websocket_disconnect(void)
 {
+    /* Called by audio/main task, never from websocket event callback. */
     if (client != NULL) {
         esp_websocket_client_close(client, pdMS_TO_TICKS(1000));
     }
