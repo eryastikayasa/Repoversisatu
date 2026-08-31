@@ -3,6 +3,7 @@
 #include "websocket_mgr.h"
 #include "audio_hal.h"
 #include "websocket_internal.h"
+#include "uart_control.h"
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -460,6 +461,9 @@ extern "C" void app_main()
     gpio_set_direction(BOOT_BUTTON_GPIO, GPIO_MODE_INPUT);
     gpio_set_pull_mode(BOOT_BUTTON_GPIO, GPIO_PULLUP_ONLY);
     ESP_LOGI(TAG, "Tombol boot siap di GPIO0");
+
+    // UART control is independent from the audio task.
+    uart_control_init();
 
     display_status("Menghubungkan WiFi...");
     wifi_init_sta();
