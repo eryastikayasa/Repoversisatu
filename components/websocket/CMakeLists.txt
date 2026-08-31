@@ -20,6 +20,7 @@ idf_component_register(
         display
         audio_hal
         wifi_manager
+        uart_control
 )
 
 # V7.0.12: increase only the ESP WebSocket client's internal task stack.
