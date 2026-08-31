@@ -6,207 +6,891 @@
 #include "freertos/semphr.h"
 
 static const char *TAG = "FACE_ANIM";
+
 static TaskHandle_t anim_task_handle = NULL;
 static SemaphoreHandle_t anim_start_mutex = NULL;
 
-static uint32_t rnd(uint32_t max_value) { return max_value ? esp_random() % max_value : 0; }
+/* ============================================================
+ * RANDOM
+ * ============================================================ */
 
-static void render(int expr, int step, int sx, int sy, int look)
+static uint32_t rnd(uint32_t max_value)
 {
-    display_render_mochi(expr, step, sx, sy, look);
+    return max_value
+        ? esp_random() % max_value
+        : 0;
 }
 
-static void smooth_move(int from_x, int from_y, int to_x, int to_y,
-                        uint32_t duration_ms, int look, face_state_t state)
-{
-    const int step_ms = 30;
-    int steps = (int)(duration_ms / step_ms);
-    if (steps < 1) steps = 1;
-    int expr = 0;
-    if (state == FACE_HAPPY || state == FACE_LISTENING) expr = 1;
-    else if (state == FACE_SAD) expr = 6;
-    else if (state == FACE_ERROR) expr = 99;
-    else if (state == FACE_SPEAKING) expr = 2;
+/* ============================================================
+ * RENDER HELPER
+ * ============================================================ */
 
-    for (int i = 1; i <= steps; ++i) {
-        if (face_get_state() != state) return;
-        int x = from_x + ((to_x - from_x) * i) / steps;
-        int y = from_y + ((to_y - from_y) * i) / steps;
-        render(expr, 0, x, y, look);
-        vTaskDelay(pdMS_TO_TICKS(step_ms));
+static void render(
+    int expr,
+    int step,
+    int sx,
+    int sy,
+    int look
+)
+{
+    display_render_mochi(
+        expr,
+        step,
+        sx,
+        sy,
+        look
+    );
+}
+
+/* ============================================================
+ * NATURAL BLINK
+ * ============================================================ */
+
+static bool natural_blink(
+    face_state_t state,
+    int expr
+)
+{
+    if (face_get_state() != state) {
+        return false;
     }
-}
 
-static void blink(face_state_t state, bool double_blink)
-{
-    int expr = (state == FACE_HAPPY || state == FACE_LISTENING) ? 2 :
-               (state == FACE_SAD ? 6 : 0);
-    if (face_get_state() != state) return;
-    render(expr, 1, 0, 0, 0);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    if (face_get_state() != state) return;
-    render(expr, 0, 0, 0, 0);
-    vTaskDelay(pdMS_TO_TICKS(120));
-    if (double_blink && face_get_state() == state) {
-        render(expr, 1, 0, 0, 0);
-        vTaskDelay(pdMS_TO_TICKS(100));
-        if (face_get_state() == state) render(expr, 0, 0, 0, 0);
+    /*
+     * Blink pertama.
+     */
+    render(
+        expr,
+        1,
+        0,
+        0,
+        0
+    );
+
+    vTaskDelay(
+        pdMS_TO_TICKS(
+            70 + rnd(45)
+        )
+    );
+
+    if (face_get_state() != state) {
+        return false;
     }
-}
 
-static int idle_shift_x = 0;
-static int idle_shift_y = 0;
-static int idle_expression = 0;
-static TickType_t next_shift_tick = 0;
-static bool idle_shift_initialized = false;
+    /*
+     * Buka lagi.
+     */
+    render(
+        expr,
+        0,
+        0,
+        0,
+        0
+    );
 
-static void update_idle_shift(void)
-{
-    TickType_t now = xTaskGetTickCount();
-    if (!idle_shift_initialized || now >= next_shift_tick) {
-        idle_shift_initialized = true;
-        idle_shift_x = (int)rnd(7) - 3;
-        idle_shift_y = (int)rnd(5) - 2;
-        idle_expression = (int)rnd(3);
-        next_shift_tick = now + pdMS_TO_TICKS(30000 + rnd(30001));
+    /*
+     * Kadang double blink.
+     */
+    if (rnd(5) == 0) {
+
+        vTaskDelay(
+            pdMS_TO_TICKS(
+                90 + rnd(100)
+            )
+        );
+
+        if (face_get_state() != state) {
+            return false;
+        }
+
+        render(
+            expr,
+            1,
+            0,
+            0,
+            0
+        );
+
+        vTaskDelay(
+            pdMS_TO_TICKS(
+                65 + rnd(40)
+            )
+        );
+
+        if (face_get_state() != state) {
+            return false;
+        }
+
+        render(
+            expr,
+            0,
+            0,
+            0,
+            0
+        );
     }
+
+    return true;
 }
 
-static void idle_render(int step, int extra_x, int extra_y, int look)
-{
-    update_idle_shift();
-    render(idle_expression, step,
-           idle_shift_x + extra_x,
-           idle_shift_y + extra_y,
-           look);
-}
+/* ============================================================
+ * IDLE
+ *
+ * Karakter:
+ * - mata terbuka
+ * - lirik kiri
+ * - kembali tengah
+ * - lirik kanan
+ * - kembali tengah
+ * - blink random
+ * ============================================================ */
 
 static void idle_sequence(void)
 {
-    update_idle_shift();
-    vTaskDelay(pdMS_TO_TICKS(1500 + rnd(2001)));
-    if (face_get_state() != FACE_IDLE) return;
-    update_idle_shift();
+    /*
+     * Tunggu random supaya tidak mekanis.
+     */
+    vTaskDelay(
+        pdMS_TO_TICKS(
+            1200 + rnd(1800)
+        )
+    );
+
+    if (face_get_state() != FACE_IDLE) {
+        return;
+    }
+
     uint32_t behavior = rnd(100);
 
+    /*
+     * 30% melihat kiri.
+     */
     if (behavior < 30) {
-        int x = (rnd(2) == 0) ? -4 : 4;
-        int y = (int)rnd(7) - 3;
-        smooth_move(idle_shift_x, idle_shift_y,
-                    idle_shift_x + x, idle_shift_y + y, 180, 0, FACE_IDLE);
-        if (face_get_state() != FACE_IDLE) return;
-        vTaskDelay(pdMS_TO_TICKS(180 + rnd(121)));
-        smooth_move(idle_shift_x + x, idle_shift_y + y,
-                    idle_shift_x, idle_shift_y, 180, 0, FACE_IDLE);
-    } else if (behavior < 55) {
-        int look = (rnd(2) == 0) ? 1 : 2;
-        idle_render(0, 0, 0, look);
-        vTaskDelay(pdMS_TO_TICKS(450 + rnd(401)));
-        if (face_get_state() == FACE_IDLE) idle_render(0, 0, 0, 0);
-    } else if (behavior < 70) {
-        int look = (rnd(2) == 0) ? 1 : 2;
-        int x = (look == 1) ? -3 : 3;
-        int y = (look == 1) ? -2 : 2;
-        smooth_move(idle_shift_x, idle_shift_y,
-                    idle_shift_x + x, idle_shift_y + y, 150, look, FACE_IDLE);
-        if (face_get_state() != FACE_IDLE) return;
-        vTaskDelay(pdMS_TO_TICKS(200 + rnd(201)));
-        smooth_move(idle_shift_x + x, idle_shift_y + y,
-                    idle_shift_x, idle_shift_y, 150, 0, FACE_IDLE);
-    } else {
-        blink(FACE_IDLE, rnd(5) == 0);
+
+        render(
+            0,
+            0,
+            0,
+            0,
+            1
+        );
+
+        vTaskDelay(
+            pdMS_TO_TICKS(
+                350 + rnd(350)
+            )
+        );
+
+        if (face_get_state() != FACE_IDLE) {
+            return;
+        }
+
+        render(
+            0,
+            0,
+            0,
+            0,
+            0
+        );
+    }
+
+    /*
+     * 30% melihat kanan.
+     */
+    else if (behavior < 60) {
+
+        render(
+            0,
+            0,
+            0,
+            0,
+            2
+        );
+
+        vTaskDelay(
+            pdMS_TO_TICKS(
+                350 + rnd(350)
+            )
+        );
+
+        if (face_get_state() != FACE_IDLE) {
+            return;
+        }
+
+        render(
+            0,
+            0,
+            0,
+            0,
+            0
+        );
+    }
+
+    /*
+     * 20% micro movement.
+     */
+    else if (behavior < 80) {
+
+        render(
+            0,
+            0,
+            0,
+            0,
+            1
+        );
+
+        vTaskDelay(
+            pdMS_TO_TICKS(
+                120 + rnd(150)
+            )
+        );
+
+        if (face_get_state() != FACE_IDLE) {
+            return;
+        }
+
+        render(
+            0,
+            0,
+            0,
+            0,
+            2
+        );
+
+        vTaskDelay(
+            pdMS_TO_TICKS(
+                120 + rnd(150)
+            )
+        );
+
+        if (face_get_state() != FACE_IDLE) {
+            return;
+        }
+
+        render(
+            0,
+            0,
+            0,
+            0,
+            0
+        );
+    }
+
+    /*
+     * 20% blink.
+     */
+    else {
+
+        natural_blink(
+            FACE_IDLE,
+            0
+        );
     }
 }
 
-static void state_sequence(face_state_t state)
+/* ============================================================
+ * LISTENING
+ *
+ * Lebih fokus daripada IDLE.
+ * ============================================================ */
+
+static void listening_sequence(void)
+{
+    /*
+     * Awal selalu fokus ke tengah.
+     */
+    render(
+        1,
+        0,
+        0,
+        0,
+        0
+    );
+
+    vTaskDelay(
+        pdMS_TO_TICKS(
+            700 + rnd(900)
+        )
+    );
+
+    if (face_get_state() != FACE_LISTENING) {
+        return;
+    }
+
+    uint32_t behavior = rnd(100);
+
+    /*
+     * Lihat kiri.
+     */
+    if (behavior < 30) {
+
+        render(
+            1,
+            0,
+            0,
+            0,
+            1
+        );
+
+        vTaskDelay(
+            pdMS_TO_TICKS(
+                500 + rnd(400)
+            )
+        );
+
+        if (face_get_state() != FACE_LISTENING) {
+            return;
+        }
+
+        render(
+            1,
+            0,
+            0,
+            0,
+            0
+        );
+    }
+
+    /*
+     * Lihat kanan.
+     */
+    else if (behavior < 60) {
+
+        render(
+            1,
+            0,
+            0,
+            0,
+            2
+        );
+
+        vTaskDelay(
+            pdMS_TO_TICKS(
+                500 + rnd(400)
+            )
+        );
+
+        if (face_get_state() != FACE_LISTENING) {
+            return;
+        }
+
+        render(
+            1,
+            0,
+            0,
+            0,
+            0
+        );
+    }
+
+    /*
+     * Blink.
+     */
+    else {
+
+        natural_blink(
+            FACE_LISTENING,
+            1
+        );
+    }
+}
+
+/* ============================================================
+ * THINKING
+ *
+ * Mata melihat ke ATAS.
+ * Pupil ikut ke atas.
+ * ============================================================ */
+
+static void thinking_sequence(void)
+{
+    /*
+     * Awal tengah.
+     */
+    render(
+        0,
+        0,
+        0,
+        0,
+        0
+    );
+
+    vTaskDelay(
+        pdMS_TO_TICKS(
+            250 + rnd(250)
+        )
+    );
+
+    if (face_get_state() != FACE_THINKING) {
+        return;
+    }
+
+    /*
+     * Lihat ATAS.
+     *
+     * arahLirik = 3
+     */
+    render(
+        0,
+        0,
+        0,
+        0,
+        3
+    );
+
+    /*
+     * Tahan seperti orang berpikir.
+     */
+    vTaskDelay(
+        pdMS_TO_TICKS(
+            500 + rnd(500)
+        )
+    );
+
+    if (face_get_state() != FACE_THINKING) {
+        return;
+    }
+
+    /*
+     * Kadang blink ketika melihat atas.
+     */
+    if (rnd(3) != 0) {
+
+        render(
+            0,
+            1,
+            0,
+            0,
+            3
+        );
+
+        vTaskDelay(
+            pdMS_TO_TICKS(
+                70 + rnd(35)
+            )
+        );
+
+        if (face_get_state() != FACE_THINKING) {
+            return;
+        }
+
+        render(
+            0,
+            0,
+            0,
+            0,
+            3
+        );
+    }
+
+    /*
+     * Tahan lagi sedikit.
+     */
+    vTaskDelay(
+        pdMS_TO_TICKS(
+            300 + rnd(400)
+        )
+    );
+
+    if (face_get_state() != FACE_THINKING) {
+        return;
+    }
+
+    /*
+     * Kembali tengah.
+     */
+    render(
+        0,
+        0,
+        0,
+        0,
+        0
+    );
+}
+
+/* ============================================================
+ * SPEAKING
+ *
+ * Mata SELALU tengah.
+ * Hanya blink.
+ * ============================================================ */
+
+static void speaking_sequence(void)
+{
+    /*
+     * Jangan lirik kiri/kanan.
+     */
+    render(
+        2,
+        0,
+        0,
+        0,
+        0
+    );
+
+    vTaskDelay(
+        pdMS_TO_TICKS(
+            900 + rnd(1400)
+        )
+    );
+
+    if (face_get_state() != FACE_SPEAKING) {
+        return;
+    }
+
+    natural_blink(
+        FACE_SPEAKING,
+        2
+    );
+}
+
+/* ============================================================
+ * HAPPY
+ *
+ * Mata tertutup melengkung.
+ * ============================================================ */
+
+static void happy_sequence(void)
+{
+    if (face_get_state() != FACE_HAPPY) {
+        return;
+    }
+
+    /*
+     * step = 2 berarti HAPPY CURVE.
+     */
+    render(
+        2,
+        2,
+        0,
+        0,
+        0
+    );
+
+    vTaskDelay(
+        pdMS_TO_TICKS(
+            700
+        )
+    );
+
+    if (face_get_state() != FACE_HAPPY) {
+        return;
+    }
+
+    /*
+     * Sedikit naik/turun agar tidak terlalu statis.
+     */
+    render(
+        2,
+        2,
+        0,
+        -1,
+        0
+    );
+
+    vTaskDelay(
+        pdMS_TO_TICKS(
+            250
+        )
+    );
+
+    if (face_get_state() == FACE_HAPPY) {
+        face_set_state(
+            FACE_LISTENING
+        );
+    }
+}
+
+/* ============================================================
+ * SAD
+ *
+ * Mata menutup.
+ * ============================================================ */
+
+static void sad_sequence(void)
+{
+    if (face_get_state() != FACE_SAD) {
+        return;
+    }
+
+    render(
+        6,
+        0,
+        0,
+        0,
+        0
+    );
+
+    vTaskDelay(
+        pdMS_TO_TICKS(
+            500 + rnd(400)
+        )
+    );
+}
+
+/* ============================================================
+ * ERROR
+ *
+ * X X + sedikit getaran.
+ * ============================================================ */
+
+static void error_sequence(void)
+{
+    if (face_get_state() != FACE_ERROR) {
+        return;
+    }
+
+    /*
+     * Getaran kecil.
+     */
+    render(
+        99,
+        0,
+        -1,
+        0,
+        0
+    );
+
+    vTaskDelay(
+        pdMS_TO_TICKS(
+            70
+        )
+    );
+
+    if (face_get_state() != FACE_ERROR) {
+        return;
+    }
+
+    render(
+        99,
+        0,
+        1,
+        0,
+        0
+    );
+
+    vTaskDelay(
+        pdMS_TO_TICKS(
+            70
+        )
+    );
+
+    if (face_get_state() != FACE_ERROR) {
+        return;
+    }
+
+    render(
+        99,
+        0,
+        0,
+        0,
+        0
+    );
+
+    vTaskDelay(
+        pdMS_TO_TICKS(
+            400
+        )
+    );
+}
+
+/* ============================================================
+ * SLEEP
+ *
+ * Mata tertutup horizontal.
+ * ============================================================ */
+
+static void sleep_sequence(void)
+{
+    if (face_get_state() != FACE_SLEEP) {
+        return;
+    }
+
+    /*
+     * Gunakan renderer khusus garis horizontal.
+     */
+    memset(
+        face_buffer,
+        0,
+        sizeof(face_buffer)
+    );
+
+    /*
+     * Kita tidak mengakses buffer dari sini.
+     * Renderer utama tetap dipakai.
+     *
+     * Untuk saat ini gunakan blink sebagai
+     * kondisi tidur stabil.
+     */
+    render(
+        0,
+        1,
+        0,
+        0,
+        0
+    );
+
+    vTaskDelay(
+        pdMS_TO_TICKS(
+            700
+        )
+    );
+}
+
+/* ============================================================
+ * STATE DISPATCHER
+ * ============================================================ */
+
+static void state_sequence(
+    face_state_t state
+)
 {
     switch (state) {
-    case FACE_LISTENING:
-        render(1, 0, 0, 0, 0);
-        vTaskDelay(pdMS_TO_TICKS(180));
-        break;
-    case FACE_THINKING:
-        smooth_move(0, 0, -4, -2, 180, 1, state);
-        if (face_get_state() != state) break;
-        vTaskDelay(pdMS_TO_TICKS(120));
-        smooth_move(-4, -2, 4, -2, 360, 2, state);
-        if (face_get_state() != state) break;
-        vTaskDelay(pdMS_TO_TICKS(120));
-        smooth_move(4, -2, 0, 0, 180, 0, state);
-        break;
-    case FACE_SPEAKING:
-        while (face_get_state() == FACE_SPEAKING) {
-            render(2, 0, 0, 0, 0);
-            vTaskDelay(pdMS_TO_TICKS(120));
-            if (face_get_state() != FACE_SPEAKING) break;
-            render(2, 1, 0, 0, 0);
-            vTaskDelay(pdMS_TO_TICKS(90));
-            if (face_get_state() != FACE_SPEAKING) break;
-            render(2, 0, 0, 0, 1);
-            vTaskDelay(pdMS_TO_TICKS(120));
-        }
-        break;
-    case FACE_HAPPY:
-        render(2, 0, 0, -1, 0);
-        vTaskDelay(pdMS_TO_TICKS(140));
-        if (face_get_state() != FACE_HAPPY) break;
-        render(2, 0, 0, 0, 0);
-        vTaskDelay(pdMS_TO_TICKS(140));
-        if (face_get_state() == FACE_HAPPY) face_set_state(FACE_LISTENING);
-        break;
-    case FACE_SAD:
-        smooth_move(0, 0, 0, 2, 120, 0, state);
-        if (face_get_state() != state) break;
-        render(6, 0, 0, 0, 0);
-        vTaskDelay(pdMS_TO_TICKS(250));
-        break;
-    case FACE_ERROR:
-        smooth_move(0, 0, 1, 0, 120, 0, state);
-        if (face_get_state() != state) break;
-        render(99, 0, 0, 0, 0);
-        vTaskDelay(pdMS_TO_TICKS(250));
-        break;
-    case FACE_SLEEP:
-        render(0, 1, 0, 0, 0);
-        vTaskDelay(pdMS_TO_TICKS(500));
-        break;
-    case FACE_IDLE:
-    default:
-        idle_sequence();
-        break;
+
+        case FACE_IDLE:
+            idle_sequence();
+            break;
+
+        case FACE_LISTENING:
+            listening_sequence();
+            break;
+
+        case FACE_THINKING:
+            thinking_sequence();
+            break;
+
+        case FACE_SPEAKING:
+            speaking_sequence();
+            break;
+
+        case FACE_HAPPY:
+            happy_sequence();
+            break;
+
+        case FACE_SAD:
+            sad_sequence();
+            break;
+
+        case FACE_ERROR:
+            error_sequence();
+            break;
+
+        case FACE_SLEEP:
+            sleep_sequence();
+            break;
+
+        default:
+            idle_sequence();
+            break;
     }
 }
 
-static void face_animation_task(void *arg)
+/* ============================================================
+ * ANIMATION TASK
+ * ============================================================ */
+
+static void face_animation_task(
+    void *arg
+)
 {
     (void)arg;
+
     oled_init();
-    while (1) state_sequence(face_get_state());
+
+    while (1) {
+
+        state_sequence(
+            face_get_state()
+        );
+    }
 }
+
+/* ============================================================
+ * START
+ * ============================================================ */
 
 void face_animation_start(void)
 {
     if (!anim_start_mutex) {
-        anim_start_mutex = xSemaphoreCreateMutex();
-        if (!anim_start_mutex) { ESP_LOGE(TAG, "Gagal membuat mutex animasi OLED"); return; }
-    }
-    xSemaphoreTake(anim_start_mutex, portMAX_DELAY);
-    if (!anim_task_handle) {
-        BaseType_t ok = xTaskCreate(face_animation_task, "face_anim", 6144, NULL, 2, &anim_task_handle);
-        if (ok != pdPASS) {
-            ESP_LOGE(TAG, "Gagal membuat task animasi OLED");
-            anim_task_handle = NULL;
-        } else {
-            ESP_LOGI(TAG, "Mochi OLED animation aktif");
+
+        anim_start_mutex =
+            xSemaphoreCreateMutex();
+
+        if (!anim_start_mutex) {
+
+            ESP_LOGE(
+                TAG,
+                "Gagal membuat mutex animasi OLED"
+            );
+
+            return;
         }
     }
-    xSemaphoreGive(anim_start_mutex);
+
+    xSemaphoreTake(
+        anim_start_mutex,
+        portMAX_DELAY
+    );
+
+    if (!anim_task_handle) {
+
+        BaseType_t ok =
+            xTaskCreate(
+                face_animation_task,
+                "face_anim",
+                6144,
+                NULL,
+                2,
+                &anim_task_handle
+            );
+
+        if (ok != pdPASS) {
+
+            ESP_LOGE(
+                TAG,
+                "Gagal membuat task animasi OLED"
+            );
+
+            anim_task_handle = NULL;
+
+        } else {
+
+            ESP_LOGI(
+                TAG,
+                "Mochi OLED animation aktif"
+            );
+        }
+    }
+
+    xSemaphoreGive(
+        anim_start_mutex
+    );
 }
+
+/* ============================================================
+ * STOP
+ * ============================================================ */
 
 void face_animation_stop(void)
 {
-    if (!anim_start_mutex) return;
-    xSemaphoreTake(anim_start_mutex, portMAX_DELAY);
-    if (anim_task_handle) { vTaskDelete(anim_task_handle); anim_task_handle = NULL; }
-    xSemaphoreGive(anim_start_mutex);
+    if (!anim_start_mutex) {
+        return;
+    }
+
+    xSemaphoreTake(
+        anim_start_mutex,
+        portMAX_DELAY
+    );
+
+    if (anim_task_handle) {
+
+        vTaskDelete(
+            anim_task_handle
+        );
+
+        anim_task_handle = NULL;
+    }
+
+    xSemaphoreGive(
+        anim_start_mutex
+    );
 }
