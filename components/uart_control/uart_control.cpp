@@ -53,6 +53,18 @@ void uart_control_send(const char *cmd)
     ESP_LOGI(TAG, "TX: %s", cmd);
 }
 
+bool uart_control_execute_command(const char *command)
+{
+    if (command == NULL || command[0] == '\0') return false;
+    if (!is_valid_action(command)) {
+        ESP_LOGW(TAG, "Command ditolak: %s", command);
+        return false;
+    }
+    uart_control_send(command);
+    ESP_LOGI(TAG, "Gemini command diterima: %s", command);
+    return true;
+}
+
 bool uart_control_process_action_text(const char *text)
 {
     if (text == NULL) return false;
@@ -70,15 +82,7 @@ bool uart_control_process_action_text(const char *text)
     char action[32];
     memcpy(action, tag, len);
     action[len] = '\0';
-
-    if (!is_valid_action(action)) {
-        ESP_LOGW(TAG, "ACTION ditolak: %s", action);
-        return false;
-    }
-
-    uart_control_send(action);
-    ESP_LOGI(TAG, "Gemini ACTION diterima: %s", action);
-    return true;
+    return uart_control_execute_command(action);
 }
 
 int uart_control_read(char *buf, size_t max_len)
