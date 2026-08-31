@@ -1,6 +1,7 @@
 #include "websocket_internal.h"
 #include "websocket_mgr.h"
 #include "audio_hal.h"
+#include "display.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
@@ -14,16 +15,14 @@
 
 static const char *TAG = "WS_AUDIO";
 static volatile bool audio_clear_pending = false;
-volatile uint8_t gemini_volume_percent = 100;
-static int16_t volume_buffer[2048];
 
 static StaticSemaphore_t audio_send_mutex_storage;
 static SemaphoreHandle_t audio_send_mutex = NULL;
 
 #define AUDIO_OUTPUT_SAMPLE_RATE       24000U
 #define AUDIO_OUTPUT_BYTES_PER_SEC     (AUDIO_OUTPUT_SAMPLE_RATE * 2U)
-#define AUDIO_RING_BUFFER_SIZE         (512 * 1024)  // 512 KiB
-#define AUDIO_PLAYBACK_PREBUFFER_SIZE  (256 * 1024)  // 256 KiB
+#define AUDIO_RING_BUFFER_SIZE         (512 * 1024)
+#define AUDIO_PLAYBACK_PREBUFFER_SIZE  (128 * 1024)
 #define AUDIO_PLAYBACK_READ_SIZE       2048
 #define AUDIO_PLAYBACK_READ_WAIT_MS    5
 #define AUDIO_PLAYBACK_TRIGGER_SIZE    1024
@@ -35,26 +34,19 @@ static volatile uint32_t audio_turn_generation = 0;
 static size_t send_realtime_pcm(const uint8_t *data, size_t len)
 {
     if (audio_stream == NULL || data == NULL || len == 0) return 0;
-    size_t offset = 0; 
+    size_t offset = 0;
     while (offset < len) {
         size_t chunk = len - offset;
         if (chunk > AUDIO_SEND_CHUNK_SIZE) chunk = AUDIO_SEND_CHUNK_SIZE;
         chunk &= ~((size_t)1);
         if (chunk == 0) break;
 
-       TickType_t start = xTaskGetTickCount();
-
-while (xStreamBufferSpacesAvailable(audio_stream) < chunk) {
-    if ((xTaskGetTickCount() - start) > pdMS_TO_TICKS(50)) {
-        break;
-    }
-    vTaskDelay(pdMS_TO_TICKS(1));
-}
-
-if (xStreamBufferSpacesAvailable(audio_stream) < chunk) {
-    // gagal setelah timeout
-    break;
-}
+        TickType_t start = xTaskGetTickCount();
+        while (xStreamBufferSpacesAvailable(audio_stream) < chunk) {
+            if ((xTaskGetTickCount() - start) > pdMS_TO_TICKS(50)) break;
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+        if (xStreamBufferSpacesAvailable(audio_stream) < chunk) break;
 
         size_t written = xStreamBufferSend(audio_stream, data + offset, chunk,
                                            pdMS_TO_TICKS(AUDIO_SEND_WAIT_MS));
@@ -70,19 +62,9 @@ if (xStreamBufferSpacesAvailable(audio_stream) < chunk) {
                  (unsigned)offset, (unsigned)len,
                  (unsigned)xStreamBufferBytesAvailable(audio_stream),
                  (unsigned)xStreamBufferSpacesAvailable(audio_stream));
-        continue;
     }
     return offset;
 }
-
-void set_gemini_volume(uint8_t percent)
-{
-    (void)percent;
-    gemini_volume_percent = 100;
-    ESP_LOGI(TAG, "Volume Gemini: NONAKTIF (forced 100%%)");
-}
-
-uint8_t get_gemini_volume(void) { return 100; }
 
 size_t get_audio_pending_bytes(void)
 {
@@ -104,6 +86,7 @@ void check_audio_playback_complete(void)
              (unsigned long long)audio_bytes_played,
              (unsigned long long)audio_bytes_dropped,
              (long long)balance);
+    face_set_state(FACE_IDLE);
 }
 
 static void audio_playback_task(void *arg)
@@ -122,8 +105,6 @@ static void audio_playback_task(void *arg)
     for (;;) {
         if (audio_clear_pending) {
             audio_clear_pending = false;
-            /* Do not let the playback task wait forever on the producer mutex.
-             * A permanent wait here can starve the idle task and trigger WDT. */
             if (audio_send_mutex != NULL) {
                 if (xSemaphoreTake(audio_send_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
                     if (audio_stream != NULL) xStreamBufferReset(audio_stream);
@@ -158,7 +139,6 @@ static void audio_playback_task(void *arg)
 
         size_t pending = xStreamBufferBytesAvailable(audio_stream);
 
-        /* 16 KiB = 341 ms at 24 kHz PCM16 mono. Prime before I2S starts. */
         if (!playback_started && pending < AUDIO_PLAYBACK_PREBUFFER_SIZE &&
             audio_turn_active && !audio_turn_complete_pending) {
             vTaskDelay(pdMS_TO_TICKS(5));
@@ -180,7 +160,6 @@ static void audio_playback_task(void *arg)
                                                pdMS_TO_TICKS(AUDIO_PLAYBACK_READ_WAIT_MS));
         if (received == 0) {
             check_audio_playback_complete();
-            /* Explicit scheduler yield even on the empty-buffer path. */
             vTaskDelay(1);
             continue;
         }
@@ -190,7 +169,10 @@ static void audio_playback_task(void *arg)
             continue;
         }
 
-        playback_started = true;
+        if (!playback_started) {
+            playback_started = true;
+            face_set_state(FACE_SPEAKING);
+        }
         underrun_reported = false;
         audio_write_speaker(playback_buffer, received);
         audio_write_calls++;
@@ -215,7 +197,6 @@ static void audio_playback_task(void *arg)
             underrun_reported = false;
         }
 
-        /* Mandatory yield after every playback iteration. */
         vTaskDelay(1);
     }
 }
@@ -231,20 +212,17 @@ bool start_audio_playback(void)
         }
     }
 
-    // Alokasikan memori untuk stream buffer di PSRAM
     uint8_t *buffer_mem = (uint8_t*)heap_caps_malloc(AUDIO_RING_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
     if (buffer_mem == NULL) {
-        // Fallback ke RAM internal jika PSRAM gagal
         buffer_mem = (uint8_t*)heap_caps_malloc(AUDIO_RING_BUFFER_SIZE, MALLOC_CAP_INTERNAL);
         if (buffer_mem == NULL) {
-            ESP_LOGE(TAG, "Gagal alokasi %u byte untuk audio buffer", 
+            ESP_LOGE(TAG, "Gagal alokasi %u byte untuk audio buffer",
                      (unsigned)AUDIO_RING_BUFFER_SIZE);
             return false;
         }
         ESP_LOGW(TAG, "Menggunakan RAM internal untuk audio buffer");
     }
 
-    // Buat static stream buffer menggunakan memori yang sudah dialokasikan
     static StaticStreamBuffer_t stream_buffer_struct;
     audio_stream = xStreamBufferCreateStatic(AUDIO_RING_BUFFER_SIZE,
                                              AUDIO_PLAYBACK_TRIGGER_SIZE,
@@ -255,9 +233,7 @@ bool start_audio_playback(void)
         heap_caps_free(buffer_mem);
         return false;
     }
-    /* v7.1.3 diagnostic: lower playback priority and keep it on CPU0 as in
-     * the failing v7.1.2 trace. This isolates priority/idle starvation first
-     * without changing I2S, DMA, ring size, or WebSocket behavior. */
+
     BaseType_t result = xTaskCreatePinnedToCore(audio_playback_task, "audio_playback",
                                                 4096, NULL, 6,
                                                 &audio_playback_task_handle, 0);
@@ -353,9 +329,7 @@ bool queue_audio_pcm(const uint8_t *pcm, size_t len)
     uint64_t queued_before = audio_bytes_queued;
     uint64_t dropped_before = audio_bytes_dropped;
 
-    /* Volume command feature is disabled for the stability test.
-     * Keep the incoming Gemini PCM untouched so the audio path is exactly
-     * the proven PCM16 -> ring buffer -> I2S path. */
+    // Volume feature removed: Gemini PCM masuk ke playback tanpa modifikasi.
     (void)send_realtime_pcm(pcm, len);
 
     const uint64_t queued_delta = audio_bytes_queued - queued_before;
