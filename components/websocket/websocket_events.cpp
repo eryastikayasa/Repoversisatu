@@ -8,6 +8,7 @@
 
 static const char *TAG = "WS_EVENT";
 static volatile bool lifecycle_invalidated = false;
+static volatile bool websocket_cleanup_pending = false;
 
 static void invalidate_connection_generation(void)
 {
@@ -35,6 +36,7 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
         case WEBSOCKET_EVENT_CONNECTED:
             ESP_LOGI(TAG, "WebSocket TERHUBUNG ke Gemini!");
             lifecycle_invalidated = false;
+            websocket_cleanup_pending = false;
             is_connected = true;
             setup_complete = false;
             websocket_tx_error = false;
@@ -88,6 +90,8 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
             websocket_rx_flush_queue();
             websocket_rx_request_reset();
             request_audio_buffer_clear();
+            /* Never close/abort/destroy the client from this callback. */
+            websocket_cleanup_pending = true;
             break;
 
         case WEBSOCKET_EVENT_DISCONNECTED:
@@ -103,6 +107,7 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
             display_status("AI Disconnected");
             if (session_resumable && session_handle[0] != '\0')
                 ESP_LOGI(TAG, "Session resumption handle dipertahankan");
+            websocket_cleanup_pending = true;
             break;
 
         case WEBSOCKET_EVENT_CLOSED:
@@ -115,20 +120,32 @@ void websocket_event_handler(void *handler_args, esp_event_base_t base,
             websocket_rx_flush_queue();
             websocket_rx_request_reset();
             request_audio_buffer_clear();
+            websocket_cleanup_pending = true;
             break;
 
         case WEBSOCKET_EVENT_FINISH:
             ESP_LOGI(TAG, "WebSocket FINISH");
-            // Hancurkan client untuk memungkinkan koneksi ulang
-            if (client != NULL) {
-                esp_websocket_client_destroy(client);
-                client = NULL;
-            }
-            // Reset flag internal websocket_mgr agar bisa start lagi
-            websocket_reset_started(); // Pastikan fungsi ini dideklarasikan
+            /*
+             * ESP-IDF runs this callback from the websocket task. Do NOT call
+             * esp_websocket_client_destroy() here: the client may still own
+             * the task's lifecycle locks. The manager performs destruction
+             * from its own task after FINISH has been observed.
+             */
+            websocket_cleanup_pending = true;
+            websocket_reset_started();
             break;
 
         default:
             break;
     }
+}
+
+bool websocket_cleanup_is_pending(void)
+{
+    return websocket_cleanup_pending;
+}
+
+void websocket_cleanup_complete(void)
+{
+    websocket_cleanup_pending = false;
 }
