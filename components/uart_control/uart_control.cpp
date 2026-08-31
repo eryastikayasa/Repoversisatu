@@ -12,6 +12,21 @@ static const char *TAG = "UART_CTRL";
 #define UART_CONTROL_BAUDRATE 115200
 #define UART_CONTROL_BUF_SIZE 1024
 
+static bool is_valid_action(const char *action)
+{
+    static const char *const allowed[] = {
+        "r1_on", "r1_off", "r2_on", "r2_off", "r3_on", "r3_off", "r4_on", "r4_off",
+        "fan_on", "fan_off", "fan_pwr", "fan_speed", "fan_swing", "fan_mode",
+        "mp3_mode", "mp3_play", "mp3_eq",
+        "m_led", "m_mute", "m_musik", "m_cek",
+        "cek_suhu", "cek_cahaya"
+    };
+    for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); ++i) {
+        if (strcmp(action, allowed[i]) == 0) return true;
+    }
+    return false;
+}
+
 void uart_control_init(void)
 {
     uart_config_t uart_cfg = {};
@@ -36,6 +51,34 @@ void uart_control_send(const char *cmd)
     uart_write_bytes(UART_CONTROL_NUM, cmd, strlen(cmd));
     uart_write_bytes(UART_CONTROL_NUM, "\n", 1);
     ESP_LOGI(TAG, "TX: %s", cmd);
+}
+
+bool uart_control_process_action_text(const char *text)
+{
+    if (text == NULL) return false;
+
+    const char *tag = strstr(text, "[ACTION:");
+    if (tag == NULL) return false;
+    tag += 8;
+
+    const char *end = strchr(tag, ']');
+    if (end == NULL) return false;
+
+    size_t len = (size_t)(end - tag);
+    if (len == 0 || len >= 32) return false;
+
+    char action[32];
+    memcpy(action, tag, len);
+    action[len] = '\0';
+
+    if (!is_valid_action(action)) {
+        ESP_LOGW(TAG, "ACTION ditolak: %s", action);
+        return false;
+    }
+
+    uart_control_send(action);
+    ESP_LOGI(TAG, "Gemini ACTION diterima: %s", action);
+    return true;
 }
 
 int uart_control_read(char *buf, size_t max_len)
