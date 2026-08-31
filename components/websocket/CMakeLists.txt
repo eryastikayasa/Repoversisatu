@@ -6,6 +6,7 @@ idf_component_register(
         "websocket_json.cpp"
         "websocket_audio.cpp"
         "websocket_tx.cpp"
+        "websocket_tool.cpp"
         "websocket_stack_wrap.c"
 
     INCLUDE_DIRS
