@@ -7,6 +7,7 @@ idf_component_register(
 
     REQUIRES
         esp-sr
+        uart_control
 )
 
 # ESP-SR 2.4.1 owns the model packaging flow.
