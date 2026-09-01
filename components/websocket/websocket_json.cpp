@@ -256,14 +256,54 @@ static void process_gemini_tool_call(cJSON *tool_call)
 
         bool success = false;
         if (strcmp(name->valuestring, "control_device") == 0) {
-            cJSON *command = cJSON_GetObjectItem(args, "command");
-            if (cJSON_IsString(command) && command->valuestring) {
-                success = uart_control_execute_command(command->valuestring);
-                ESP_LOGI(TAG, "UART TOOL command=%s result=%s",
-                         command->valuestring, success ? "OK" : "REJECTED");
-            } else {
-                ESP_LOGW(TAG, "control_device tanpa argument command");
-            }
+    cJSON *command = cJSON_GetObjectItem(args, "command");
+
+    if (cJSON_IsString(command) && command->valuestring) {
+        const char *cmd = command->valuestring;
+
+        if (strcmp(cmd, "face_idle") == 0) {
+            face_show_for_ms(FACE_IDLE, 5000);
+            success = true;
+        }
+        else if (strcmp(cmd, "face_listening") == 0) {
+            face_show_for_ms(FACE_LISTENING, 5000);
+            success = true;
+        }
+        else if (strcmp(cmd, "face_thinking") == 0) {
+            face_show_for_ms(FACE_THINKING, 5000);
+            success = true;
+        }
+        else if (strcmp(cmd, "face_speaking") == 0) {
+            face_show_for_ms(FACE_SPEAKING, 5000);
+            success = true;
+        }
+        else if (strcmp(cmd, "face_happy") == 0) {
+            face_show_for_ms(FACE_HAPPY, 5000);
+            success = true;
+        }
+        else if (strcmp(cmd, "face_sad") == 0) {
+            face_show_for_ms(FACE_SAD, 5000);
+            success = true;
+        }
+        else if (strcmp(cmd, "face_error") == 0) {
+            face_show_for_ms(FACE_ERROR, 5000);
+            success = true;
+        }
+        else if (strcmp(cmd, "face_sleep") == 0) {
+            face_show_for_ms(FACE_SLEEP, 5000);
+            success = true;
+        }
+        else {
+            success = uart_control_execute_command(cmd);
+
+            ESP_LOGI(TAG,
+                     "UART TOOL command=%s result=%s",
+                     cmd,
+                     success ? "OK" : "REJECTED");
+        }
+    } else {
+        ESP_LOGW(TAG, "control_device tanpa argument command");
+    }
         }
 
         if (!websocket_send_tool_response(id->valuestring, name->valuestring, success))
