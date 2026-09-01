@@ -9,174 +9,229 @@ static const char *TAG = "FACE_ANIM";
 static TaskHandle_t anim_task_handle = NULL;
 static SemaphoreHandle_t anim_start_mutex = NULL;
 
+// OLED is relatively slow at 400 kHz. 45 ms keeps gaze movement visibly smooth
+// without turning the animation task into an aggressive I2C producer.
+static constexpr TickType_t FRAME_DELAY = pdMS_TO_TICKS(45);
+
 static uint32_t rnd(uint32_t max_value)
 {
     return max_value ? esp_random() % max_value : 0;
 }
 
-static void render(int expr, int step, int sx, int sy, int look)
+static bool state_ok(face_state_t state)
 {
-    display_render_mochi(expr, step, sx, sy, look);
+    return face_get_state() == state;
 }
 
-static bool blink_at(face_state_t state, int expr, int look)
+static void render(int expr, int step, int sx, int sy, int gaze_x, int gaze_y)
 {
-    if (face_get_state() != state) return false;
-    render(expr, 1, 0, 0, look);
-    vTaskDelay(pdMS_TO_TICKS(65 + rnd(40)));
-    if (face_get_state() != state) return false;
-    render(expr, 0, 0, 0, look);
-    return true;
+    display_render_mochi_gaze(expr, step, sx, sy, gaze_x, gaze_y);
 }
 
-static bool natural_blink(face_state_t state, int expr, int look)
+static bool smooth_gaze(face_state_t state,
+                        int expr,
+                        int from_x,
+                        int from_y,
+                        int to_x,
+                        int to_y,
+                        uint32_t frames)
 {
-    if (!blink_at(state, expr, look)) return false;
+    if (!state_ok(state)) return false;
+    if (frames == 0) frames = 1;
 
-    /* Sesekali double blink. */
-    if (rnd(5) == 0) {
-        vTaskDelay(pdMS_TO_TICKS(100 + rnd(100)));
-        if (!blink_at(state, expr, look)) return false;
+    for (uint32_t i = 1; i <= frames; ++i) {
+        if (!state_ok(state)) return false;
+
+        // Smoothstep avoids a robotic constant-speed jump at the endpoints.
+        float t = (float)i / (float)frames;
+        t = t * t * (3.0f - 2.0f * t);
+
+        int gx = from_x + (int)((to_x - from_x) * t);
+        int gy = from_y + (int)((to_y - from_y) * t);
+        render(expr, 0, 0, 0, gx, gy);
+        vTaskDelay(FRAME_DELAY);
+    }
+
+    return state_ok(state);
+}
+
+static bool blink(face_state_t state, int expr, int gaze_x, int gaze_y)
+{
+    if (!state_ok(state)) return false;
+
+    // A short close/open cycle looks more natural than an instantaneous swap.
+    render(expr, 1, 0, 0, gaze_x, gaze_y);
+    vTaskDelay(pdMS_TO_TICKS(75 + rnd(25)));
+    if (!state_ok(state)) return false;
+
+    render(expr, 0, 0, 0, gaze_x, gaze_y);
+    vTaskDelay(pdMS_TO_TICKS(55));
+    return state_ok(state);
+}
+
+static bool natural_blink(face_state_t state, int expr, int gaze_x, int gaze_y)
+{
+    if (!blink(state, expr, gaze_x, gaze_y)) return false;
+
+    // Occasional double blink, but deliberately uncommon.
+    if (rnd(6) == 0) {
+        vTaskDelay(pdMS_TO_TICKS(110 + rnd(90)));
+        if (!blink(state, expr, gaze_x, gaze_y)) return false;
     }
     return true;
 }
 
 static void idle_sequence(void)
 {
-    vTaskDelay(pdMS_TO_TICKS(1200 + rnd(1800)));
-    if (face_get_state() != FACE_IDLE) return;
+    // Do not animate continuously while idle; this keeps the device calm.
+    vTaskDelay(pdMS_TO_TICKS(900 + rnd(1500)));
+    if (!state_ok(FACE_IDLE)) return;
 
     uint32_t b = rnd(100);
 
-    if (b < 25) {
-        render(0, 0, 0, 0, 1);
-        vTaskDelay(pdMS_TO_TICKS(350 + rnd(400)));
-        if (face_get_state() != FACE_IDLE) return;
-        render(0, 0, 0, 0, 0);
+    // Natural blink is the most common idle action.
+    if (b < 28) {
+        natural_blink(FACE_IDLE, 0, 0, 0);
+        return;
     }
-    else if (b < 50) {
-        render(0, 0, 0, 0, 2);
-        vTaskDelay(pdMS_TO_TICKS(350 + rnd(400)));
-        if (face_get_state() != FACE_IDLE) return;
-        render(0, 0, 0, 0, 0);
+
+    int target_x = 0;
+    int target_y = 0;
+
+    if (b < 52) {
+        target_x = -6;
+    } else if (b < 76) {
+        target_x = 6;
+    } else if (b < 90) {
+        target_x = (rnd(2) == 0) ? -4 : 4;
+    } else {
+        // Very occasional upward glance.
+        target_y = -4;
+        target_x = (int)rnd(5) - 2;
     }
-    else if (b < 70) {
-        /* Lirik kiri -> tengah -> kanan -> tengah. */
-        render(0, 0, 0, 0, 1);
-        vTaskDelay(pdMS_TO_TICKS(160 + rnd(120)));
-        if (face_get_state() != FACE_IDLE) return;
-        render(0, 0, 0, 0, 0);
-        vTaskDelay(pdMS_TO_TICKS(120 + rnd(120)));
-        if (face_get_state() != FACE_IDLE) return;
-        render(0, 0, 0, 0, 2);
-        vTaskDelay(pdMS_TO_TICKS(160 + rnd(120)));
-        if (face_get_state() != FACE_IDLE) return;
-        render(0, 0, 0, 0, 0);
-    }
-    else {
-        natural_blink(FACE_IDLE, 0, 0);
-    }
+
+    // Move there, hold briefly, then return to center.
+    if (!smooth_gaze(FACE_IDLE, 0, 0, 0, target_x, target_y, 5)) return;
+    vTaskDelay(pdMS_TO_TICKS(220 + rnd(300)));
+    if (!smooth_gaze(FACE_IDLE, 0, target_x, target_y, 0, 0, 5)) return;
+
+    // Sometimes blink after looking around.
+    if (rnd(4) == 0) natural_blink(FACE_IDLE, 0, 0, 0);
 }
 
 static void listening_sequence(void)
 {
-    render(1, 0, 0, 0, 0);
-    vTaskDelay(pdMS_TO_TICKS(650 + rnd(800)));
-    if (face_get_state() != FACE_LISTENING) return;
+    // Listening is attentive: mostly center, with small believable gaze shifts.
+    if (!smooth_gaze(FACE_LISTENING, 1, 0, 0, 0, 0, 2)) return;
+    vTaskDelay(pdMS_TO_TICKS(350 + rnd(500)));
+    if (!state_ok(FACE_LISTENING)) return;
 
     uint32_t b = rnd(100);
+    int target_x = 0;
+    int target_y = 0;
 
-    if (b < 30) {
-        render(1, 0, 0, 0, 1);
-        vTaskDelay(pdMS_TO_TICKS(450 + rnd(450)));
-        if (face_get_state() != FACE_LISTENING) return;
-        render(1, 0, 0, 0, 0);
-    }
-    else if (b < 60) {
-        render(1, 0, 0, 0, 2);
-        vTaskDelay(pdMS_TO_TICKS(450 + rnd(450)));
-        if (face_get_state() != FACE_LISTENING) return;
-        render(1, 0, 0, 0, 0);
-    }
+    if (b < 24) target_x = -5;
+    else if (b < 48) target_x = 5;
+    else if (b < 58) target_y = -3;
     else {
-        natural_blink(FACE_LISTENING, 1, 0);
+        natural_blink(FACE_LISTENING, 1, 0, 0);
+        return;
     }
+
+    if (!smooth_gaze(FACE_LISTENING, 1, 0, 0, target_x, target_y, 4)) return;
+    vTaskDelay(pdMS_TO_TICKS(180 + rnd(260)));
+    if (!smooth_gaze(FACE_LISTENING, 1, target_x, target_y, 0, 0, 4)) return;
+
+    if (rnd(3) == 0) natural_blink(FACE_LISTENING, 1, 0, 0);
 }
 
 static void thinking_sequence(void)
 {
-    render(0, 0, 0, 0, 0);
-    vTaskDelay(pdMS_TO_TICKS(220 + rnd(220)));
-    if (face_get_state() != FACE_THINKING) return;
+    if (!state_ok(FACE_THINKING)) return;
 
-    /* Melihat ke atas, pupil ikut naik. */
-    render(0, 0, 0, 0, 3);
-    vTaskDelay(pdMS_TO_TICKS(500 + rnd(500)));
-    if (face_get_state() != FACE_THINKING) return;
+    // Thinking: eyes naturally drift upward, then settle back down.
+    if (!smooth_gaze(FACE_THINKING, 0, 0, 0, 0, -5, 5)) return;
+    vTaskDelay(pdMS_TO_TICKS(350 + rnd(450)));
+    if (!state_ok(FACE_THINKING)) return;
 
     if (rnd(3) != 0) {
-        blink_at(FACE_THINKING, 0, 3);
-        if (face_get_state() != FACE_THINKING) return;
+        if (!blink(FACE_THINKING, 0, 0, -5)) return;
     }
 
-    vTaskDelay(pdMS_TO_TICKS(350 + rnd(450)));
-    if (face_get_state() != FACE_THINKING) return;
-    render(0, 0, 0, 0, 0);
+    if (!state_ok(FACE_THINKING)) return;
+    vTaskDelay(pdMS_TO_TICKS(250 + rnd(350)));
+    smooth_gaze(FACE_THINKING, 0, 0, -5, 0, 0, 5);
 }
 
 static void speaking_sequence(void)
 {
-    /* Mata selalu tengah ketika berbicara. */
-    render(2, 0, 0, 0, 0);
-    vTaskDelay(pdMS_TO_TICKS(900 + rnd(1300)));
-    if (face_get_state() != FACE_SPEAKING) return;
-    natural_blink(FACE_SPEAKING, 2, 0);
+    // Speaking stays expressive but restrained so the face does not distract.
+    uint32_t b = rnd(100);
+    int target_x = 0;
+    int target_y = 0;
+
+    if (b < 18) target_x = -3;
+    else if (b < 36) target_x = 3;
+    else if (b < 42) target_y = -2;
+
+    if (!smooth_gaze(FACE_SPEAKING, 2, 0, 0, target_x, target_y, 3)) return;
+    vTaskDelay(pdMS_TO_TICKS(500 + rnd(800)));
+    if (!state_ok(FACE_SPEAKING)) return;
+
+    if (rnd(3) == 0) {
+        natural_blink(FACE_SPEAKING, 2, target_x, target_y);
+    }
+
+    smooth_gaze(FACE_SPEAKING, 2, target_x, target_y, 0, 0, 3);
 }
 
 static void happy_sequence(void)
 {
-    if (face_get_state() != FACE_HAPPY) return;
+    if (!state_ok(FACE_HAPPY)) return;
 
-    /* step 2 = mata tertutup melengkung. */
-    render(2, 2, 0, 0, 0);
-    vTaskDelay(pdMS_TO_TICKS(650));
-    if (face_get_state() != FACE_HAPPY) return;
+    // Keep HAPPY as its own state. Do not silently change it to LISTENING.
+    render(2, 2, 0, 0, 0, 0);
+    vTaskDelay(pdMS_TO_TICKS(450));
+    if (!state_ok(FACE_HAPPY)) return;
 
-    render(2, 2, 0, -1, 0);
-    vTaskDelay(pdMS_TO_TICKS(250));
-    if (face_get_state() == FACE_HAPPY) face_set_state(FACE_LISTENING);
+    render(2, 2, 0, -1, 0, 0);
+    vTaskDelay(pdMS_TO_TICKS(180));
+    if (!state_ok(FACE_HAPPY)) return;
+
+    render(2, 2, 0, 0, 0, 0);
+    vTaskDelay(pdMS_TO_TICKS(250 + rnd(250)));
 }
 
 static void sad_sequence(void)
 {
-    if (face_get_state() != FACE_SAD) return;
-    render(6, 0, 0, 0, 0);
-    vTaskDelay(pdMS_TO_TICKS(650 + rnd(450)));
+    if (!state_ok(FACE_SAD)) return;
+
+    render(6, 0, 0, 0, 0, 0);
+    vTaskDelay(pdMS_TO_TICKS(800 + rnd(600)));
 }
 
 static void error_sequence(void)
 {
-    if (face_get_state() != FACE_ERROR) return;
+    if (!state_ok(FACE_ERROR)) return;
 
-    /* X X + shake kecil. */
-    render(99, 0, -1, 0, 0);
+    // Short shake, then settle. No high-frequency loop.
+    render(99, 0, -1, 0, 0, 0);
     vTaskDelay(pdMS_TO_TICKS(65));
-    if (face_get_state() != FACE_ERROR) return;
+    if (!state_ok(FACE_ERROR)) return;
 
-    render(99, 0, 1, 0, 0);
+    render(99, 0, 1, 0, 0, 0);
     vTaskDelay(pdMS_TO_TICKS(65));
-    if (face_get_state() != FACE_ERROR) return;
+    if (!state_ok(FACE_ERROR)) return;
 
-    render(99, 0, 0, 0, 0);
+    render(99, 0, 0, 0, 0, 0);
     vTaskDelay(pdMS_TO_TICKS(450));
 }
 
 static void sleep_sequence(void)
 {
-    if (face_get_state() != FACE_SLEEP) return;
+    if (!state_ok(FACE_SLEEP)) return;
 
-    /* step 3 = mata tertutup mendatar. */
-    render(0, 3, 0, 0, 0);
+    render(0, 3, 0, 0, 0, 0);
     vTaskDelay(pdMS_TO_TICKS(1200));
 }
 
@@ -199,7 +254,10 @@ static void face_animation_task(void *arg)
 {
     (void)arg;
     oled_init();
-    while (1) state_sequence(face_get_state());
+
+    while (1) {
+        state_sequence(face_get_state());
+    }
 }
 
 void face_animation_start(void)
