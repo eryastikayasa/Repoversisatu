@@ -159,8 +159,25 @@ static void sync_sntp_time(void)
 
 static bool mic_frame_has_activity(const uint8_t *data, size_t len)
 {
-    if (!data || len < 2) return false; constexpr int32_t SILENCE_THRESHOLD = 200; constexpr size_t MIN_ACTIVE_SAMPLES = 8; size_t active_samples = 0;
-    for (size_t i = 0; i + 1 < len; i += 2) { int16_t sample = (int16_t)((uint16_t)data[i] | ((uint16_t)data[i + 1] << 8)); int32_t magnitude = sample < 0 ? -(int32_t)sample : (int32_t)sample; if (magnitude >= SILENCE_THRESHOLD) { active_samples++; if (active_samples >= MIN_ACTIVE_SAMPLES) return true; } }
+    if (!data || len < 2) {
+        return false;
+    }
+
+    constexpr int32_t SILENCE_THRESHOLD = 200;
+    constexpr size_t MIN_ACTIVE_SAMPLES = 8;
+    size_t active_samples = 0;
+
+    for (size_t i = 0; i + 1 < len; i += 2) {
+        int16_t sample = (int16_t)((uint16_t)data[i] | ((uint16_t)data[i + 1] << 8));
+        int32_t magnitude = sample < 0 ? -(int32_t)sample : (int32_t)sample;
+        if (magnitude >= SILENCE_THRESHOLD) {
+            active_samples++;
+            if (active_samples >= MIN_ACTIVE_SAMPLES) {
+                return true;
+            }
+        }
+    }
+
     return false;
 }
 
@@ -208,17 +225,27 @@ extern "C" void app_main()
 
     oled_init(); face_animation_start(); face_set_state(FACE_SLEEP); display_status("Booting...");
     audio_hal_init(); audio_i2s_test_tone();
-    if (!wakeword_init()) { ESP_LOGE(TAG, "WakeNet init gagal. Sistem tetap bisa dimulai dengan tombol BOOT."); display_status("WakeNet gagal!"); } else { display_status("Katakan: Hi, ESP"); }
-    gpio_set_direction(BOOT_BUTTON_GPIO, GPIO_MODE_INPUT); gpio_set_pull_mode(BOOT_BUTTON_GPIO, GPIO_PULLUP_ONLY); ESP_LOGI(TAG, "Tombol boot siap di GPIO0");
-    uart_control_init();
+    if (!wakeword_init()) { ESP_LOGE(TAG, "WakeNet init gagal. Sistem tetap bisa dimulai dengan tombol BOOT."); }
 
-    display_status("Menghubungkan WiFi...");
-    wifi_init_sta();
-    if (!wifi_wait_for_connection(15000)) { ESP_LOGE(TAG, "Wi-Fi tidak mendapatkan IP."); display_status("WiFi Gagal!"); face_set_state(FACE_ERROR); while (1) vTaskDelay(pdMS_TO_TICKS(1000)); }
+    xTaskCreatePinnedToCore(audio_task, "audio_task", 8192, nullptr, 5, nullptr, 1);
+    wifi_manager_init();
+    while (!wifi_is_connected()) {
+        if (!wifi_manager_poll()) {
+            face_set_state(FACE_ERROR);
+            display_status("WiFi Error!");
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            face_set_state(FACE_SLEEP);
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
 
-    esp_wifi_set_ps(WIFI_PS_NONE); ESP_LOGI(TAG, "WiFi power save dimatikan"); ESP_LOGI(TAG, "WIFI READY - lanjut ke NTP"); sync_sntp_time(); ESP_LOGI(TAG, "Menunggu 1 detik..."); vTaskDelay(pdMS_TO_TICKS(1000));
-    debug_network_path(); vTaskDelay(pdMS_TO_TICKS(1000)); face_set_state(FACE_SLEEP); display_status("Sistem siap. Katakan Hi, ESP...");
+    sync_sntp_time();
+    debug_network_path();
+    face_set_state(FACE_SLEEP);
+    display_status("AI Siap Menunggu");
 
-    BaseType_t task_result = xTaskCreate(audio_task, "audio_task", 10240, NULL, 5, NULL); if (task_result != pdPASS) ESP_LOGE(TAG, "Gagal membuat audio_task!"); else ESP_LOGI(TAG, "audio_task berhasil dimulai.");
-    while (1) vTaskDelay(pdMS_TO_TICKS(1000));
+    while (1) {
+        uart_control_poll();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
 }
