@@ -137,6 +137,15 @@ static void add_device_control_tool(cJSON *setup)
         "mp3_mode", "mp3_play", "mp3_eq",
         "m_led", "m_mute", "m_musik", "m_cek",
         "cek_suhu", "cek_cahaya"
+          // Gemini Face commands
+        "face_idle",
+        "face_listening",
+        "face_thinking",
+        "face_speaking",
+        "face_happy",
+        "face_sad",
+        "face_error",
+        "face_sleep"
     };
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i)
         cJSON_AddItemToArray(enum_values, cJSON_CreateString(commands[i]));
