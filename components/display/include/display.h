@@ -54,6 +54,7 @@ void face_animation_start(void);
 void face_animation_stop(void);
 void face_set_state(face_state_t state);
 face_state_t face_get_state(void);
+void face_show_for_ms(face_state_t state, uint32_t duration_ms);
 
 #ifdef __cplusplus
 }
