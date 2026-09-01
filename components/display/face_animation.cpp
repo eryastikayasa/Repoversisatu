@@ -4,10 +4,16 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "esp_timer.h"
 
 static const char *TAG = "FACE_ANIM";
 static TaskHandle_t anim_task_handle = NULL;
 static SemaphoreHandle_t anim_start_mutex = NULL;
+
+// Temporary Face override requested by Gemini tool.
+// Non-blocking: the animation task checks the deadline periodically.
+static face_state_t face_override_previous = FACE_IDLE;
+static int64_t face_override_until_us = 0;
 
 // OLED is relatively slow at 400 kHz. 45 ms keeps gaze movement visibly smooth
 // without turning the animation task into an aggressive I2C producer.
@@ -250,13 +256,48 @@ static void state_sequence(face_state_t state)
     }
 }
 
+void face_show_for_ms(face_state_t state, uint32_t duration_ms)
+{
+    face_override_previous = face_get_state();
+    face_set_state(state);
+
+    if (duration_ms == 0) {
+        face_override_until_us = 0;
+        return;
+    }
+
+    face_override_until_us =
+        esp_timer_get_time() + ((int64_t)duration_ms * 1000LL);
+
+    ESP_LOGI(TAG,
+             "FACE TOOL: state=%d duration=%lu ms previous=%d",
+             (int)state,
+             (unsigned long)duration_ms,
+             (int)face_override_previous);
+}
+
 static void face_animation_task(void *arg)
 {
     (void)arg;
     oled_init();
 
     while (1) {
-        state_sequence(face_get_state());
+    if (face_override_until_us > 0 &&
+        esp_timer_get_time() >= face_override_until_us) {
+
+        face_override_until_us = 0;
+
+        face_state_t restore_state = face_override_previous;
+
+        // Jangan restore ke state temporary yang sudah berakhir.
+        face_set_state(restore_state);
+
+        ESP_LOGI(TAG,
+                 "FACE TOOL: selesai 5 detik -> restore state=%d",
+                 (int)restore_state);
+    }
+
+    state_sequence(face_get_state());
     }
 }
 
