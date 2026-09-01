@@ -86,7 +86,7 @@ void check_audio_playback_complete(void)
              (unsigned long long)audio_bytes_played,
              (unsigned long long)audio_bytes_dropped,
              (long long)balance);
-    face_set_state(FACE_IDLE);
+    face_set_state(FACE_LISTENING);
 }
 
 static void audio_playback_task(void *arg)
