@@ -136,7 +136,7 @@ static void add_device_control_tool(cJSON *setup)
         "fan_on", "fan_off", "fan_pwr", "fan_speed", "fan_swing", "fan_mode",
         "mp3_mode", "mp3_play", "mp3_eq",
         "m_led", "m_mute", "m_musik", "m_cek",
-        "cek_suhu", "cek_cahaya"
+        "cek_suhu", "cek_cahaya", 
           // Gemini Face commands
         "face_idle",
         "face_listening",
